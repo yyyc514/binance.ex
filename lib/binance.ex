@@ -1,12 +1,24 @@
 defmodule Binance do
   @endpoint "https://api.binance.com"
 
-  defp get_binance(url) do
-    case HTTPoison.get("#{@endpoint}#{url}") do
+  defp get_binance(url, params \\ %{}) do
+    argument_string =
+      params
+      |> Map.to_list()
+      |> Enum.map(fn x -> Tuple.to_list(x) |> Enum.join("=") end)
+      |> Enum.join("&")
+
+      argument_string = case String.length(argument_string) == 0 do
+        true -> ""
+        false -> "?#{argument_string}"
+      end
+
+    case HTTPoison.get("#{@endpoint}#{url}#{argument_string}") do
       {:error, err} ->
         {:error, {:http_error, err}}
 
       {:ok, response} ->
+        IO.puts(response.body)
         case Poison.decode(response.body) do
           {:ok, data} -> {:ok, data}
           {:error, err} -> {:error, {:poison_decode_error, err}}
@@ -131,6 +143,22 @@ defmodule Binance do
   def get_ticker(symbol) when is_binary(symbol) do
     case get_binance("/api/v1/ticker/24hr?symbol=#{symbol}") do
       {:ok, data} -> {:ok, Binance.Ticker.new(data)}
+      err -> err
+    end
+  end
+
+  # Klines / Candlesticks
+
+  def get_candlesticks(symbol, interval, limit \\ nil, startTime \\ nil, endTime \\ nil ) do
+    arguments = %{symbol: symbol, interval: interval}
+    |> Map.merge(
+      unless(is_nil(limit), do: %{limit: limit}, else: %{} ))
+    |> Map.merge(
+      unless(is_nil(startTime), do: %{startTime: startTime}, else: %{}))
+    |> Map.merge(
+      unless(is_nil(startTime), do: %{endTime: endTime}, else: %{}))
+    case get_binance("/api/v1/klines", arguments) do
+      {:ok, data} -> {:ok, Binance.Candlestick.new(data)}
       err -> err
     end
   end
