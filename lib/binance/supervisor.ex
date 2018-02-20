@@ -11,6 +11,7 @@ defmodule Binance.Supervisor do
 
   def init(:ok) do
     children = [
+      Binance,
       Binance.SymbolCache
     ]
 

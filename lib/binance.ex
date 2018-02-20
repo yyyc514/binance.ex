@@ -1,5 +1,43 @@
 defmodule Binance do
+  @moduledoc """
+  Binance API
+  """
   @endpoint "https://api.binance.com"
+  @max_weight 1000
+
+  use GenServer
+
+  def start_link(init_args) do
+    GenServer.start_link(__MODULE__, [init_args], name: __MODULE__)
+  end
+
+  def init(_args) do
+    state = %{
+      minutes: div(:os.system_time(:second), 60),
+      api_calls: 0,
+      weight: 0,
+      log: []
+    }
+    {:ok, state}
+  end
+
+  def add_weight(x) do
+    GenServer.call(__MODULE__, {:add_weight, x})
+  end
+
+  # get the history of weight against the API
+  def pressure() do
+    GenServer.call(__MODULE__, :pressure)
+  end
+
+  def pressure_now() do
+    List.first(pressure())
+  end
+
+  alias Binance.Candlestick
+  alias Binance.Ticker
+  alias Binance.SymbolPrice
+  alias Binance.SymbolCache
 
   defp get_binance(url, params \\ %{}) do
     argument_string =
@@ -18,7 +56,6 @@ defmodule Binance do
         {:error, {:http_error, err}}
 
       {:ok, response} ->
-        IO.puts(response.body)
         case Poison.decode(response.body) do
           {:ok, data} -> {:ok, data}
           {:error, err} -> {:error, {:poison_decode_error, err}}
@@ -64,6 +101,7 @@ defmodule Binance do
   Pings binance API. Returns `{:ok, %{}}` if successful, `{:error, reason}` otherwise
   """
   def ping() do
+    add_weight(1)
     get_binance("/api/v1/ping")
   end
 
@@ -79,6 +117,7 @@ defmodule Binance do
 
   """
   def get_server_time() do
+    add_weight(1)
     case get_binance("/api/v1/time") do
       {:ok, %{"serverTime" => time}} -> {:ok, time}
       err -> err
@@ -105,9 +144,10 @@ defmodule Binance do
   ```
   """
   def get_all_prices() do
+    add_weight(1)
     case get_binance("/api/v1/ticker/allPrices") do
       {:ok, data} ->
-        {:ok, Enum.map(data, &Binance.SymbolPrice.new(&1))}
+        {:ok, Enum.map(data, &SymbolPrice.new(&1))}
 
       err ->
         err
@@ -141,24 +181,34 @@ defmodule Binance do
   end
 
   def get_ticker(symbol) when is_binary(symbol) do
+    add_weight(1)
     case get_binance("/api/v1/ticker/24hr?symbol=#{symbol}") do
-      {:ok, data} -> {:ok, Binance.Ticker.new(data)}
+      {:ok, data} -> {:ok, Ticker.new(data)}
       err -> err
     end
   end
 
+  def get_all_tickers() do
+    add_weight(1)
+    case get_binance("/api/v1/ticker/24hr") do
+      {:ok, data} ->
+        tickers = Enum.map(data,&(Ticker.new(&1)))
+        {:ok, tickers}
+      err -> err
+    end
+  end
+
+
   # Klines / Candlesticks
 
   def get_candlesticks(symbol, interval, limit \\ nil, startTime \\ nil, endTime \\ nil ) do
+    add_weight(1)
     arguments = %{symbol: symbol, interval: interval}
-    |> Map.merge(
-      unless(is_nil(limit), do: %{limit: limit}, else: %{} ))
-    |> Map.merge(
-      unless(is_nil(startTime), do: %{startTime: startTime}, else: %{}))
-    |> Map.merge(
-      unless(is_nil(startTime), do: %{endTime: endTime}, else: %{}))
+    |> put_unless_nil(:limit, limit)
+    |> put_unless_nil(:startTime, startTime)
+    |> put_unless_nil(:endTime, endTime)
     case get_binance("/api/v1/klines", arguments) do
-      {:ok, data} -> {:ok, Binance.Candlestick.new(data)}
+      {:ok, data} -> {:ok, Candlestick.new(data)}
       err -> err
     end
   end
@@ -186,17 +236,17 @@ defmodule Binance do
         iceberg_quantity \\ nil,
         receiving_window \\ 1000,
         timestamp \\ nil
-      ) do
-    timestamp =
-      case timestamp do
-        # timestamp needs to be in milliseconds
-        nil ->
-          :os.system_time(:millisecond)
+      )
+      when side in ["BUY", "SELL"]
+      when type in ["LIMIT", "MARKET", "STOP_LOSS", "STOP_LOSS_LIMIT", "TAKE_PROFIT",
+        "TAKE_PROFIT_LIMIT", "LIMIT_MAKER"]
+      when is_number(quantity)
+      when is_number(stop_price) or is_nil(stop_price)
+      when time_in_force in ["GTC", "IOC", "FOK", nil]
+      when is_binary(symbol) do
 
-        t ->
-          t
-      end
-
+    add_weight(1)
+    timestamp = timestamp || :os.system_time(:millisecond)
     arguments =
       %{
         symbol: symbol,
@@ -206,19 +256,11 @@ defmodule Binance do
         timestamp: timestamp,
         recvWindow: receiving_window
       }
-      |> Map.merge(
-        unless(
-          is_nil(new_client_order_id),
-          do: %{newClientOrderId: new_client_order_id},
-          else: %{}
-        )
-      )
-      |> Map.merge(unless(is_nil(new_client_order_id), do: %{stopPrice: stop_price}, else: %{}))
-      |> Map.merge(
-        unless(is_nil(new_client_order_id), do: %{icebergQty: iceberg_quantity}, else: %{})
-      )
-      |> Map.merge(unless(is_nil(time_in_force), do: %{timeInForce: time_in_force}, else: %{}))
-      |> Map.merge(unless(is_nil(price), do: %{price: price}, else: %{}))
+      |> put_unless_nil(:newClientOrderId, new_client_order_id)
+      |> put_unless_nil(:stopPrice, stop_price)
+      |> put_unless_nil(:icebergQty, iceberg_quantity)
+      |> put_unless_nil(:timeInForce, time_in_force)
+      |> put_unless_nil(:price, price)
 
     case post_binance("/api/v3/order", arguments) do
       {:ok, %{"code" => code, "msg" => msg}} ->
@@ -354,7 +396,7 @@ defmodule Binance do
   def find_symbol(%Binance.TradePair{from: from, to: to} = tp)
       when is_binary(from)
       when is_binary(to) do
-    case Binance.SymbolCache.get() do
+    case SymbolCache.get() do
       # cache hit
       {:ok, data} ->
         from = String.upcase(from)
@@ -373,7 +415,7 @@ defmodule Binance do
           {:ok, price_data} ->
             price_data
             |> Enum.map(fn x -> x.symbol end)
-            |> Binance.SymbolCache.store()
+            |> SymbolCache.store()
 
             find_symbol(tp)
 
@@ -385,4 +427,56 @@ defmodule Binance do
         err
     end
   end
+
+  # utility
+  defp put_unless_nil(map, k, v) do
+    case v do
+      nil -> map
+      _ -> Map.put(map, k, v)
+    end
+  end
+
+  def handle_call({:add_weight, w}, _from, state) do
+    now = div(:os.system_time(:second), 60)
+
+    state = case now > state.minutes do
+      true -> reset(state)
+      _ -> state
+    end
+
+    calls = state.api_calls
+    weight = state.weight
+
+    if weight > 800 do
+      IO.puts("Pressure on API = #{weight}.  Sleeping for 1 minute.")
+      Process.sleep 60_000
+    end
+
+    {:reply, :ok, %{state | api_calls: calls + 1, weight: weight + w}}
+  end
+
+  def handle_call(:pressure, _from, state) do
+    out = [state.weight] ++ state.log
+    {:reply, out, state}
+  end
+
+  defp reset(state) do
+    log = state.log ++ [state.weight]
+    |> limit_log_to(30)
+
+    state
+    |> Map.put(:minutes, div(:os.system_time(:second), 60))
+    |> Map.put(:api_calls, 0)
+    |> Map.put(:weight, 0)
+    |> Map.put(:log, log)
+  end
+
+  defp limit_log_to(log, max) do
+    size = Enum.count(log)
+    case size > max do
+      true -> Enum.drop(log, size - max)
+      false -> log
+    end
+  end
+
 end

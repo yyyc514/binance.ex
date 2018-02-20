@@ -18,6 +18,10 @@ defmodule Binance.Candlestick do
     :reserved1
   ]
 
+  def new([]) do
+    []
+  end
+
   def new(candles=[hd|_tail]) when is_list(candles) and is_list(hd) do
     candles
     |> Enum.map(fn(candle) ->
